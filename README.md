@@ -34,5 +34,3 @@ It uses **local FAISS vector search** for document retrieval and **Vertex AI emb
 ```bash
 git clone https://github.com/yourusername/gemini-telegram-bot.git
 cd gemini-telegram-bot
-git clone https://github.com/yourusername/gemini-telegram-bot.git
-cd gemini-telegram-bot
