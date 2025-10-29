@@ -1,59 +1,49 @@
 import os
-import json
 import asyncio
 import logging
+import json
 import numpy as np
 import faiss
-from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
 from google.cloud import aiplatform
 import google.generativeai as genai
+import nest_asyncio
+import asyncio
+nest_asyncio.apply()
+from vertexai.generative_models import GenerationConfig, GenerativeModel, SafetySetting
+# ============== CONFIG =====================
 
-# =====================================
-# 🔧 Load environment variables
-# =====================================
-load_dotenv()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID")
-LOCATION = os.getenv("GOOGLE_LOCATION", "us-central1")
-
+PROJECT_ID = "gpeg-camps-platform"
+LOCATION = "us-central1"
 EMBED_MODEL = "text-embedding-005"
 GEN_MODEL = "gemini-2.5-flash"
-
-aiplatform.init(project=PROJECT_ID, location=LOCATION)
-genai.configure(project=PROJECT_ID, location=LOCATION)
-
 logging.basicConfig(level=logging.INFO)
 
-# =====================================
-# 📄 Initialize sample documents
-# =====================================
+# ============== SAMPLE DOCS =====================
 DOCS = {
-    "policy.txt": "Employees must submit leave requests 2 days in advance. Remote work is allowed up to 3 days a week.",
-    "recipe.txt": "To make pasta: boil water, add salt, cook pasta for 8-10 minutes, then drain and mix with sauce.",
+    "policy.txt": "Employees must submit leave requests 2 days in advance. Sick leaves one per month and casal leave is 2 per month. Remote work is allowed up to 3 days a week.",
+    "recipe.txt": "To make pasta: boil water, add salt, cook pasta for 8-10 minutes, then drain and mix with sauce. To make briyani: boil water, add masala, add chicken, cook for 15 mins,  add rice, cook for 10 mins, wait for 15 mins before serve",
     "faq.txt": "To reset your password, go to settings, click 'Reset Password', and follow the email instructions.",
-    "personal.txt": "My name is Susu and age is 105. Eats chicken and favourite colour is Red.",
 }
 
 os.makedirs("data", exist_ok=True)
 DOC_PATH = "data/docs.json"
-
 if not os.path.exists(DOC_PATH):
     with open(DOC_PATH, "w") as f:
         json.dump(DOCS, f)
 
-# =====================================
-# 🧠 Memory and Cache
-# =====================================
-USER_HISTORY = {}   # {user_id: [{"q": query, "a": answer}]}
+# ============== MEMORY + CACHE =====================
+USER_HISTORY = {}   # {user_id: [ {"q": query, "a": answer}, ... ] }
 EMBED_CACHE = {}    # {text: np.ndarray}
 
-# =====================================
-# 🔍 Embedding + FAISS Index
-# =====================================
+# ============== EMBEDDINGS =====================
 def get_text_embedding(text: str):
-    """Generate embeddings and cache results"""
+    """Generate and cache embeddings"""
     if text in EMBED_CACHE:
         return EMBED_CACHE[text]
     from vertexai.preview.language_models import TextEmbeddingModel
@@ -63,7 +53,7 @@ def get_text_embedding(text: str):
     return emb
 
 def build_faiss_index():
-    """Build FAISS index for stored docs"""
+    """Build FAISS index for docs"""
     with open(DOC_PATH) as f:
         docs = json.load(f)
     keys, vectors = [], []
@@ -93,11 +83,9 @@ def retrieve_similar(query, top_k=1):
 if not os.path.exists("data/index.faiss"):
     build_faiss_index()
 
-# =====================================
-# 🤖 Gemini Generator
-# =====================================
+# ============== GEMINI =====================
 async def generate_answer(context_text, user_query, user_history=None):
-    """Generate context-aware response"""
+    """Generate response using Gemini with context and last 3 turns"""
     hist_text = ""
     if user_history:
         for h in user_history[-3:]:
@@ -109,7 +97,7 @@ You are a helpful assistant. Use the context below to answer.
 Context:
 {context_text}
 
-Conversation history:
+Recent conversation:
 {hist_text}
 
 User query:
@@ -117,18 +105,16 @@ User query:
 
 Answer clearly and concisely.
 """
-    model = genai.GenerativeModel(GEN_MODEL)
+    model = GenerativeModel(GEN_MODEL)
     response = model.generate_content(prompt)
     return response.text.strip()
 
-# =====================================
-# 🧾 Telegram Commands
-# =====================================
+# ============== COMMAND HANDLERS =====================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "💡 *Commands:*\n"
+        " *Commands:*\n"
         "/ask <query> → Ask about docs\n"
-        "/summarize → Summarize recent chat",
+        "/summarize → Summarize last few interactions",
         parse_mode="Markdown"
     )
 
@@ -145,20 +131,20 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         answer = await generate_answer(context_text, query, history)
     except Exception as e:
-        logging.error(f"Gemini error: {e}")
-        await update.message.reply_text(f"⚠️ Error generating answer: {e}")
+        await update.message.reply_text(f" Error generating answer: {e}")
         return
 
+    # Update memory
     USER_HISTORY.setdefault(user_id, []).append({"q": query, "a": answer})
-    USER_HISTORY[user_id] = USER_HISTORY[user_id][-3:]
+    USER_HISTORY[user_id] = USER_HISTORY[user_id][-3:]  # keep last 3
 
     await update.message.reply_text(
-        f"🧠 *Answer:*\n{answer}\n\n📄 *Source:* `{source}`",
+        f" *Answer:*\n{answer}\n\n📄 *Source:* `{source}`",
         parse_mode="Markdown"
     )
 
 async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Summarize recent chat"""
+    """Summarize the user's recent chat"""
     user_id = update.message.from_user.id
     history = USER_HISTORY.get(user_id, [])
     if not history:
@@ -166,23 +152,20 @@ async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_text = "\n".join([f"User: {h['q']}\nBot: {h['a']}" for h in history])
-    prompt = f"Summarize briefly:\n\n{chat_text}"
+    prompt = f"Summarize the following conversation briefly:\n\n{chat_text}"
 
-    model = genai.GenerativeModel(GEN_MODEL)
+    model = GenerativeModel(GEN_MODEL)
     response = model.generate_content(prompt)
     summary = response.text.strip()
+    await update.message.reply_text(f" *Summary:*\n{summary}", parse_mode="Markdown")
 
-    await update.message.reply_text(f"📝 *Summary:*\n{summary}", parse_mode="Markdown")
-
-# =====================================
-# 🚀 Main Entrypoint
-# =====================================
+# ============== MAIN =====================
 async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("ask", ask))
     app.add_handler(CommandHandler("summarize", summarize))
-    logging.info("🚀 Bot started…")
+    logging.info("Bot started…")
     await app.run_polling()
 
 if __name__ == "__main__":
